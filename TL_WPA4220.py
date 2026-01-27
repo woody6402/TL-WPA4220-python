@@ -31,6 +31,7 @@ class TL_WPA4220(object):
         self._e = None
         self._n = None
         self._timeout = 15*1000
+        self._auth_cookie = None
         self._logger = logging.getLogger(__class__.__name__)
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(logging.Formatter(
@@ -112,7 +113,7 @@ class TL_WPA4220(object):
     def logout(self):
         self._require_login()
         old_timeout = self._timeout
-        self._timeout = 0.1 # Do not block in this case...
+        self._timeout = 2.0 # Do not block in this case...
         self._encrypted_req('admin/logout.htm', self.Op.WRITE, extra_headers={
             'Cookie': 'Authorization=;path=/'
         })
@@ -214,20 +215,77 @@ class TL_WPA4220(object):
 
     def get_wlan_status(self):
         self._require_login()
-        return self._encrypted_req('admin/wlan_status', self.Op.READ)
+        return self._optional_encrypted_req('admin/wlan_status', self.Op.READ, {})
+        
+       
+# ----------------------------
+    def set_wifi(self, profile: str, enabled: bool):
+        """
+        profile: "guest_2g", "guest_5g", "wireless_2g", "wireless_5g"
+        Minimal: enable/ssid/encryption (+ pwd wenn encryption=psk) (+ channel/auto wenn vorhanden)
+        """
+        self._require_login()
+        profile = profile.lower().strip()
+        if profile not in ("guest_2g", "guest_5g", "wireless_2g", "wireless_5g"):
+            raise ValueError('profile must be one of: guest_2g, guest_5g, wireless_2g, wireless_5g')
+
+        kind, band = profile.split("_", 1)
+
+        if kind == "guest":
+            cur = (self.get_guest_wlan_2g_status() if band == "2g" else self.get_guest_wlan_5g_status()) or {}
+            prefix = f"guest_{band}_"
+            endpoint = f"admin/guest?form=guest_{band}"
+
+            # 1) Copy current data but strip the prefix from keys
+            data = {}
+            for k, v in cur.items():
+                if k.startswith(prefix):
+                    data[k[len(prefix):]] = v  # e.g. guest_2g_ssid -> ssid
+            
+            data["enable"] = "on" if enabled else "off"
+
+            #print(data)
+            return self._encrypted_req(endpoint, self.Op.WRITE, data)
+
+
+        # --- wireless ---
+        data = dict(self.get_wlan_2g_status() if band == "2g" else self.get_wlan_5g_status()) or {}
+        # prefix = f"wireless_{band}_"
+        endpoint = f"admin/wireless?form=wireless_{band}"  
+
+        data["enable"] = "on" if enabled else "off"
+        
+        #print(data)
+        return self._encrypted_req(endpoint, self.Op.WRITE, data)
+
+
+    # Komfort-Wrapper (optional)
+    def set_gwlan_2g(self, enabled: bool): return self.set_wifi("guest_2g", enabled)
+    def set_gwlan_5g(self, enabled: bool): return self.set_wifi("guest_5g", enabled)
+    def set_wlan_2g(self, enabled: bool):  return self.set_wifi("wireless_2g", enabled)
+    def set_wlan_5g(self, enabled: bool):  return self.set_wifi("wireless_5g", enabled)
+
+
+    def get_wlan_2g_status(self):
+        self._require_login()
+        return self._optional_encrypted_req('admin/wireless?form=wireless_2g', self.Op.READ, {})       
+
+    def get_wlan_5g_status(self):
+        self._require_login()
+        return self._optional_encrypted_req('admin/wireless?form=wireless_5g', self.Op.READ, {})                       
 
     def get_guest_wlan_2g_status(self):
         self._require_login()
-        return self._encrypted_req('admin/guest?form=guest_2g', self.Op.READ)
+        return self._optional_encrypted_req('admin/guest?form=guest_2g', self.Op.READ, {})               
 
     def get_guest_wlan_5g_status(self):
         self._require_login()
-        return self._encrypted_req('admin/guest?form=guest_5g', self.Op.READ)
+        return self._optional_encrypted_req('admin/guest?form=guest_5g', self.Op.READ, {})
 
     def get_wifi_move_status(self):
         self._require_login()
-        val = self._encrypted_req('admin/wifiMove.json', self.Op.READ)
-        return self._get_enabled_value(val)
+        val = self._optional_encrypted_req('admin/wifiMove.json', self.Op.READ)
+        return self._get_enabled_value(val) if val else False
 
     def toggle_wifi_move(self, enabled):
         self._require_login()
@@ -238,16 +296,16 @@ class TL_WPA4220(object):
 
     def get_wifi_time_control_enabled(self):
         self._require_login()
-        return self._encrypted_req('admin/wifiTimeEnable', self.Op.READ)
+        return self._optional_encrypted_req('admin/wifiTimeEnable', self.Op.READ)
 
     def get_wifi_time_control_status(self):
         self._require_login()
-        return self._encrypted_req('admin/wifiTimeControl', self.Op.READ)
+        return self._optional_encrypted_req('admin/wifiTimeControl', self.Op.READ, {})
 
     def get_wifi_clients(self):
         self._require_login()
         # return self._encrypted_req('data/wireless.statistics.json', self.Op.LOAD)
-        return self._encrypted_req('admin/wireless?form=statistics', self.Op.LOAD)
+        return self._optional_encrypted_req('admin/wireless?form=statistics', self.Op.LOAD, {})
 
     def get_plc_device_status(self):
         self._require_login()
@@ -270,7 +328,7 @@ class TL_WPA4220(object):
         self._require_login()
         try:
             return self._encrypted_req('admin/syslog?form=log', self.Op.LOAD)
-        except self.TL_WPA4220.TpError as e:
+        except TL_WPA4220.TpError as e:
             if e.error_code:
                 raise e
             self.logger.warning('No log level set, impossible to get logging')
@@ -326,6 +384,21 @@ class TL_WPA4220(object):
     def _get_enabled_value(self, data):
         val = {'on': 1, 'off': 0}.get(data.get('enable'), data.get('enable'))
         return bool(int(val))
+
+    def _optional_encrypted_req(self, path, operation, default=None):
+        """Wrapper around _encrypted_req that returns a default on failure.
+
+        Some models (e.g. TL-PA9020P without Wi-Fi) do not expose all
+        endpoints used by the TL-WPA4220 range.  Instead of raising an
+        exception when an endpoint is missing, gracefully return a default
+        value so that other features (like PLC status) remain usable.
+        """
+        try:
+            return self._encrypted_req(path, operation)
+        except TL_WPA4220.TpError as e:
+            # Log at debug level to avoid spamming logs in normal operation
+            self.logger.debug(f"Optional request failed for {path}: {e}")
+            return default
 
     def _unset_login_data(self):
         self._iv = None
@@ -383,9 +456,14 @@ class TL_WPA4220(object):
         encoded_data = urlencode(data)
         encrypted_data = self._aes_encrypt(encoded_data) if encoded_data else None
 
+        #data_len = len(encrypted_data) if encrypted_data else 0
+
+        # IMPORTANT: rolling seq
+        #next_seq = self._seq + data_len
+
         sign_dict = {
             'h': self._password_hash,
-            's': self._seq + (len(encrypted_data) if encrypted_data else 0),
+            's': self._seq + (len(encrypted_data) if encrypted_data else 0)
         }
 
         if operation == self.Op.LOGIN:
@@ -398,7 +476,7 @@ class TL_WPA4220(object):
         self.logger.debug(f'data {encoded_data}')
         self.logger.debug(f'sign: {urlencode(sign_dict)}')
 
-        data = {
+        post_data = {
             'sign': self._rsa_encrypt(urlencode(sign_dict)),
             'data': encrypted_data
         }
@@ -413,42 +491,63 @@ class TL_WPA4220(object):
             "Origin": "http://{}".format(self.ip),
             "Connection": "close",
             "Referer": "http://{}/".format(self.ip),
-            "Cookie": "Authorization="
         }
         headers.update(extra_headers)
-
+        if getattr(self, "_auth_cookie", None):
+            headers["Cookie"] = f"Authorization={self._auth_cookie}"
+            
         try:
-            r = requests.post(uri, data=data, headers=headers, timeout=self._timeout)
+            r = requests.post(uri, data=post_data, headers=headers, timeout=self._timeout)
+            auth = r.cookies.get("Authorization")
+            if auth:
+                self._auth_cookie = auth
+            
         except requests.exceptions.ReadTimeout:
             return None
 
         r.raise_for_status()
 
         try:
-            encrypted_data = r.json().get("data")
-            response = self._aes_decrypt(encrypted_data)
+            encrypted_resp = r.json().get("data")
+            response = self._aes_decrypt(encrypted_resp)
             self.logger.debug(f'response: {response}')
             parsed_response = json.loads(response)
+
+            # ✅ commit rolling seq after a successfully decoded response
+            # self._seq = next_seq
+
             if parsed_response.get("success"):
                 return parsed_response.get("data")
 
-            error_code = parsed_response.get("errorcode")
+            error_code = (
+                parsed_response.get("errorcode")
+                or parsed_response.get("errCode")
+            )
         except JSONDecodeError as e:
             raise TL_WPA4220.TpError(f'Failed to decode: {e}', 'decode-error')
-        except Exception as e:
-            print("There was some error, could not decrypt response. Error: {}".format(e))
-            raise e
 
         raise TL_WPA4220.TpError(
             f'Failed to execute command, error code: {error_code}', error_code)
 
+    
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Tools to manage the TL-WPA4220')
+    parser = argparse.ArgumentParser(description='Tools to manage the TL-WPA4220', formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('target', type=str, metavar='target', help='IP of the TL-WPA4220 device')
     parser.add_argument('action', type=str, metavar='action',
         default='show', nargs="?",
-        help='Action to perform: [show | led-status | led-off | led-on | reboot]')
+        help=(
+        "Action to perform:\n"
+        "  show\n"
+        "  led-status\n"
+        "  led-off | led-on\n"
+        "  reboot\n"
+        "  wlan2g-show | wlan5g-show\n"
+        "  gwlan2g-show | gwlan5g-show\n"
+        "  gwlan2g-off | gwlan2g-on\n"
+        "  gwlan5g-off | gwlan5g-on\n\n"
+        "wlan/gwlan on/off BETA, use at your own risk"
+        ))
     parser.add_argument('-p', '--password', type=str, metavar='password',
                         help='Password of the TL-WPA4220 Web interface (default: admin)', default='admin')
     parser.add_argument('-d', '--debug', action='store_true', default=False)
@@ -460,7 +559,7 @@ if __name__ == '__main__':
 
     try:
         device.login(args.password)
-        print("[+] Login executed successfully")
+        #print("[+] Login executed successfully")
     except TL_WPA4220.TpError as e:
         if (e.error_code == 'timeout'):
             # We could get the reason by the first value of JS httpAutErrorArray
@@ -481,7 +580,7 @@ if __name__ == '__main__':
         print('Profile:', device.get_profile())
         print('LanSettings', device.get_lan_settings())
         print('DhcpSettings', device.get_dhcp_settings())
-        print('DhcpClients', device.get_dhcp_clients())
+        #print('DhcpClients', device.get_dhcp_clients())
         print('WlanStatus:', device.get_wlan_status())
         print('WifiMoveStatus:', device.get_wifi_move_status())
         print('WifiTimeControl:', device.get_wifi_time_control_enabled())
@@ -495,10 +594,19 @@ if __name__ == '__main__':
         print('LedStatus:', device.get_led_status())
         print('SystemLog', device.get_system_log())
         print('SystemLogFilters', device.get_system_log_filters())
+
+        print('Wlan_2gStatus:', device.get_wlan_2g_status())
+        print('Wlan_5gStatus:', device.get_wlan_5g_status())
+
     elif args.action == 'led-status':
         led_status = device.get_led_status()
         print('Led status:', 'on' if led_status else 'off')
         exit_status = led_status
+    elif args.action == 'plc-info':
+        #print('PlcLocalSettings:', json.dumps(device.get_plc_local_settings(), indent=4))
+        plc_status = device.get_plc_device_status()
+        print(json.dumps({"data" : plc_status}, indent=4))
+        exit_status = True        
     elif args.action == 'led-on':
         device.led_switch(True)
         exit_status = device.get_led_status()
@@ -507,6 +615,39 @@ if __name__ == '__main__':
         exit_status = not device.get_led_status()
     elif args.action == 'reboot':
         sys.exit(0 if device.reboot() else 1)
+
+    elif args.action == 'gwlan5g-on':
+        device.set_gwlan_5g(True);        
+    elif args.action == 'gwlan5g-off':
+        device.set_gwlan_5g(False);
+
+    elif args.action == 'gwlan2g-on':
+        device.set_gwlan_2g(True);        
+    elif args.action == 'gwlan2g-off':
+        device.set_gwlan_2g(False);           
+
+    elif args.action == 'wlan5g-on':
+        device.set_wlan_5g(True);        
+    elif args.action == 'wlan5g-off':
+        device.set_wlan_5g(False);
+
+    elif args.action == 'wlan2g-on':
+        device.set_wlan_2g(True);        
+    elif args.action == 'wlan2g-off':
+        device.set_wlan_2g(False);            
+        
+    elif args.action == 'wlan2g-show':
+        print('Wlan_2gStatus:', device.get_wlan_2g_status())      
+    elif args.action == 'wlan5g-show':
+        print('Wlan_5gStatus:', device.get_wlan_5g_status())
+        
+    elif args.action == 'gwlan2g-show':
+        print('GuestWlan_2gStatus:', device.get_guest_wlan_2g_status())      
+    elif args.action == 'gwlan5g-show':
+        print('GuestWlan_5gStatus:', device.get_guest_wlan_5g_status())
+
+        
+        
     else:
         device.logout()
         raise argparse.ArgumentError(None, f'Unknown action {args.action}')

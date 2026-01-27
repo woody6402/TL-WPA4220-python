@@ -31,17 +31,28 @@ tuning of some parameters.
 It also comes with a base command-line tool, check `TL_WPA4220.py --help`
 
 ```
-usage: TL_WPA4220.py [-h] [-p password] [-i] [-d] target [action]
+usage: TL_WPA4220.py [-h] [-p password] [-d] target [action]
 
 Tools to manage the TL-WPA4220
 
 positional arguments:
   target                IP of the TL-WPA4220 device
-  action                Action to perform: [show | led-status | led-off | led-on | reboot]
+  action                Action to perform:
+                          show
+                          led-status
+                          led-off | led-on
+                          reboot
+                          wlan2g-show | wlan5g-show
+                          gwlan2g-show | gwlan5g-show
+                          gwlan2g-off | gwlan2g-on
+                          gwlan5g-off | gwlan5g-on
+                        
+                        wlan/gwlan on/off BETA, use at your own risk
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   -p password, --password password
                         Password of the TL-WPA4220 Web interface (default: admin)
   -d, --debug
+
 ```
