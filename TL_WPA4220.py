@@ -250,12 +250,11 @@ class TL_WPA4220(object):
 
         # --- wireless ---
         data = dict(self.get_wlan_2g_status() if band == "2g" else self.get_wlan_5g_status()) or {}
-        # prefix = f"wireless_{band}_"
+
         endpoint = f"admin/wireless?form=wireless_{band}"  
 
         data["enable"] = "on" if enabled else "off"
         
-        #print(data)
         return self._encrypted_req(endpoint, self.Op.WRITE, data)
 
 
@@ -456,14 +455,9 @@ class TL_WPA4220(object):
         encoded_data = urlencode(data)
         encrypted_data = self._aes_encrypt(encoded_data) if encoded_data else None
 
-        #data_len = len(encrypted_data) if encrypted_data else 0
-
-        # IMPORTANT: rolling seq
-        #next_seq = self._seq + data_len
-
         sign_dict = {
             'h': self._password_hash,
-            's': self._seq + (len(encrypted_data) if encrypted_data else 0)
+            's': self._seq + (len(encrypted_data) if encrypted_data else 0),
         }
 
         if operation == self.Op.LOGIN:
@@ -512,9 +506,6 @@ class TL_WPA4220(object):
             response = self._aes_decrypt(encrypted_resp)
             self.logger.debug(f'response: {response}')
             parsed_response = json.loads(response)
-
-            # ✅ commit rolling seq after a successfully decoded response
-            # self._seq = next_seq
 
             if parsed_response.get("success"):
                 return parsed_response.get("data")
