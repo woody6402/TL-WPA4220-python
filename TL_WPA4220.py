@@ -208,10 +208,19 @@ class TL_WPA4220(object):
             'snd_dns': snd_dns,
         })
 
+
     def get_dhcp_clients(self):
         if not self._get_enabled_value(self.get_dhcp_settings()):
             return []
-        return self._encrypted_req('admin/dhcps?form=client', self.Op.READ)
+
+        try:
+            return self._encrypted_req('admin/dhcps?form=client', self.Op.READ, { 'operation': 'load'})
+        except TL_WPA4220.TpError as e:
+            # firmware may not support this endpoint
+            if getattr(e, "code", None) in ("-1", -1) or "error code: -1" in str(e):
+                return []
+            raise
+
 
     def get_wlan_status(self):
         self._require_login()
@@ -380,9 +389,9 @@ class TL_WPA4220(object):
         if not self.logged_in():
             raise self.TpError('Not logged in!')
 
-    def _get_enabled_value(self, data):
-        val = {'on': 1, 'off': 0}.get(data.get('enable'), data.get('enable'))
-        return bool(int(val))
+    def _get_enabled_value(self, data: dict, key: str = "enable") -> bool:
+        v = (data or {}).get(key, 0)
+        return v is True or str(v).strip().lower() in ("1","on","true","yes","enable","enabled","auto")
 
     def _optional_encrypted_req(self, path, operation, default=None):
         """Wrapper around _encrypted_req that returns a default on failure.
@@ -502,6 +511,8 @@ class TL_WPA4220(object):
         r.raise_for_status()
 
         try:
+            self.logger.debug(f"_encrypted_req: HTTP {r.status_code} CT={r.headers.get('Content-Type')} head={r.text[:200]!r}")
+        
             encrypted_resp = r.json().get("data")
             response = self._aes_decrypt(encrypted_resp)
             self.logger.debug(f'response: {response}')
@@ -569,9 +580,9 @@ if __name__ == '__main__':
         print('Locale:', device.get_locale())
         print('Locales:', device.get_locales())
         print('Profile:', device.get_profile())
-        print('LanSettings', device.get_lan_settings())
-        print('DhcpSettings', device.get_dhcp_settings())
-        #print('DhcpClients', device.get_dhcp_clients())
+        print('LanSettings:', device.get_lan_settings())
+        print('DhcpSettings:', device.get_dhcp_settings())
+        print('DhcpClients:', device.get_dhcp_clients())
         print('WlanStatus:', device.get_wlan_status())
         print('WifiMoveStatus:', device.get_wifi_move_status())
         print('WifiTimeControl:', device.get_wifi_time_control_enabled())
@@ -583,8 +594,8 @@ if __name__ == '__main__':
         print('PlcLocalSettings:', device.get_plc_local_settings())
         print('MacFilterList:', device.get_mac_filters_list())
         print('LedStatus:', device.get_led_status())
-        print('SystemLog', device.get_system_log())
-        print('SystemLogFilters', device.get_system_log_filters())
+        print('SystemLog:', device.get_system_log())
+        print('SystemLogFilters:', device.get_system_log_filters())
 
         print('Wlan_2gStatus:', device.get_wlan_2g_status())
         print('Wlan_5gStatus:', device.get_wlan_5g_status())
@@ -635,9 +646,7 @@ if __name__ == '__main__':
     elif args.action == 'gwlan2g-show':
         print('GuestWlan_2gStatus:', device.get_guest_wlan_2g_status())      
     elif args.action == 'gwlan5g-show':
-        print('GuestWlan_5gStatus:', device.get_guest_wlan_5g_status())
-
-        
+        print('GuestWlan_5gStatus:', device.get_guest_wlan_5g_status())        
         
     else:
         device.logout()
